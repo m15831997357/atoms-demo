@@ -1,69 +1,104 @@
-import Image from "next/image";
+"use client";
+import { useState } from "react";
+
+type Msg = { role: "user" | "assistant"; content: string };
+
+// 假数据：先用它验证界面，第 2 步再换成模型生成的结果
+const FAKE_HTML = `<!doctype html>
+<html><body style="font-family:sans-serif;text-align:center;padding:40px">
+<h1>示例页面</h1>
+<p id="n">0</p>
+<button onclick="document.getElementById('n').textContent=++window.c||(window.c=1)">点我 +1</button>
+</body></html>`;
 
 export default function Home() {
+  const [messages, setMessages] = useState<Msg[]>([
+    { role: "assistant", content: "你好！描述你想做的应用，我来帮你生成。" },
+  ]);
+  const [input, setInput] = useState("");
+  const [tab, setTab] = useState<"preview" | "code">("preview");
+  const [html, setHtml] = useState("");
+
+  function send() {
+    const text = input.trim();
+    if (!text) return;
+    setMessages((m) => [
+      ...m,
+      { role: "user", content: text },
+      { role: "assistant", content: "（假数据）已生成示例页面，请在右侧查看。" },
+    ]);
+    setHtml(FAKE_HTML);
+    setInput("");
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="flex h-screen bg-white text-gray-900">
+      {/* 左：聊天区 */}
+      <div className="flex w-[380px] flex-col border-r border-gray-200">
+        <div className="border-b border-gray-200 p-4 font-semibold">Atoms Demo</div>
+        <div className="flex-1 space-y-3 overflow-y-auto p-4">
+          {messages.map((m, i) => (
+            <div key={i} className={m.role === "user" ? "text-right" : ""}>
+              <span
+                className={
+                  "inline-block max-w-[85%] rounded-lg px-3 py-2 text-sm " +
+                  (m.role === "user" ? "bg-blue-600 text-white" : "bg-gray-100")
+                }
+              >
+                {m.content}
+              </span>
+            </div>
+          ))}
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        <div className="flex gap-2 border-t border-gray-200 p-3">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              // 中文输入法选字时按回车不应触发发送
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                send();
+              }
+            }}
+            rows={2}
+            placeholder="描述你想做的应用…"
+            className="flex-1 resize-none rounded-md border border-gray-300 p-2 text-sm outline-none focus:border-blue-500"
+          />
+          <button onClick={send} className="rounded-md bg-blue-600 px-4 text-sm text-white hover:bg-blue-700">
+            发送
+          </button>
         </div>
-      </main>
+      </div>
+
+      {/* 右：预览 / 代码 */}
+      <div className="flex flex-1 flex-col">
+        <div className="flex gap-1 border-b border-gray-200 p-2">
+          {(["preview", "code"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={
+                "rounded-md px-3 py-1 text-sm " +
+                (tab === t ? "bg-gray-900 text-white" : "text-gray-600 hover:bg-gray-100")
+              }
+            >
+              {t === "preview" ? "预览" : "代码"}
+            </button>
+          ))}
+        </div>
+        <div className="flex-1 overflow-auto bg-gray-50">
+          {!html ? (
+            <div className="flex h-full items-center justify-center text-sm text-gray-400">
+              在左侧描述需求，生成的应用会显示在这里
+            </div>
+          ) : tab === "preview" ? (
+            <iframe title="preview" srcDoc={html} sandbox="allow-scripts" className="h-full w-full border-0 bg-white" />
+          ) : (
+            <pre className="p-4 text-xs whitespace-pre-wrap">{html}</pre>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
