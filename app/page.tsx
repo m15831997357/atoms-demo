@@ -19,18 +19,74 @@ export default function Home() {
   const [tab, setTab] = useState<"preview" | "code">("preview");
   const [html, setHtml] = useState("");
 
-  function send() {
-    const text = input.trim();
-    if (!text) return;
-    setMessages((m) => [
-      ...m,
-      { role: "user", content: text },
-      { role: "assistant", content: "（假数据）已生成示例页面，请在右侧查看。" },
-    ]);
-    setHtml(FAKE_HTML);
-    setInput("");
-  }
+const [loading, setLoading] = useState(false);
 
+function extractHtml(text: string) {
+  const fence = text.match(/```(?:html)?\s*([\s\S]*?)(```|$)/);
+  let code = fence ? fence[1] : text;
+  const start = code.search(/<!doctype html|<html/i);
+  if (start > 0) code = code.slice(start);
+  return code.trim();
+}
+
+async function send() {
+  const text = input.trim();
+  if (!text || loading) return;
+  const history: Msg[] = [...messages, { role: "user", content: text }];
+  setMessages([...history, { role: "assistant", content: "正在生成…" }]);
+  setInput("");
+  setLoading(true);
+  setTab("code");
+
+  const finish = (content: string) =>
+    setMessages((m) => [...m.slice(0, -1), { role: "assistant", content }]);
+
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: history.slice(1) }), // 去掉开场白
+    });
+    if (!res.ok || !res.body) {
+      const err = await res.json().catch(() => ({}));
+      finish(`生成失败：${err.error ?? res.status}`);
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let full = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") continue;
+        try {
+          const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+          if (delta) {
+            full += delta;
+            setHtml(extractHtml(full));
+          }
+        } catch {}
+      }
+    }
+    if (full) {
+      setTab("preview");
+      finish("已生成，请在右侧预览。");
+    } else {
+      finish("模型没有返回内容，请重试或换一个模型。");
+    }
+  } catch {
+    finish("网络错误，请重试。");
+  } finally {
+    setLoading(false);
+  }
+}
   return (
     <div className="flex h-screen bg-white text-gray-900">
       {/* 左：聊天区 */}
