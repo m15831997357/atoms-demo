@@ -20,6 +20,7 @@ export default function Home() {
   const [html, setHtml] = useState("");
 
 const [loading, setLoading] = useState(false);
+const [baseHtml, setBaseHtml] = useState("");
 
 function extractHtml(text: string) {
   const fence = text.match(/```(?:html)?\s*([\s\S]*?)(```|$)/);
@@ -32,24 +33,36 @@ function extractHtml(text: string) {
 async function send() {
   const text = input.trim();
   if (!text || loading) return;
-  const history: Msg[] = [...messages, { role: "user", content: text }];
-  setMessages([...history, { role: "assistant", content: "正在生成…" }]);
+  const isEdit = baseHtml !== "";
+  setMessages((m) => [
+    ...m,
+    { role: "user", content: text },
+    { role: "assistant", content: isEdit ? "正在修改…" : "正在生成…" },
+  ]);
   setInput("");
   setLoading(true);
   setTab("code");
 
   const finish = (content: string) =>
     setMessages((m) => [...m.slice(0, -1), { role: "assistant", content }]);
+  const fail = (content: string) => {
+    setHtml(baseHtml); // 回到上一个完整版本
+    finish(content);
+  };
+
+  const prompt = isEdit
+    ? `这是当前应用的完整代码：\n\n${baseHtml}\n\n请在此基础上按下面的要求修改，保留已有功能，只输出修改后的完整 HTML：\n${text}`
+    : text;
 
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: history.slice(1) }), // 去掉开场白
+      body: JSON.stringify({ messages: [{ role: "user", content: prompt }] }),
     });
     if (!res.ok || !res.body) {
       const err = await res.json().catch(() => ({}));
-      finish(`生成失败：${err.error ?? res.status}`);
+      fail(`生成失败：${err.error ?? res.status}`);
       return;
     }
     const reader = res.body.getReader();
@@ -75,14 +88,19 @@ async function send() {
         } catch {}
       }
     }
-    if (full) {
+    if (full.includes("</html>")) {
+      const done = extractHtml(full);
+      setHtml(done);
+      setBaseHtml(done);
       setTab("preview");
-      finish("已生成，请在右侧预览。");
+      finish(isEdit ? "已按要求修改，请在右侧查看。" : "已生成，请在右侧预览。");
+    } else if (full) {
+      fail("生成不完整（可能被截断），已保留上一版本，请重试。");
     } else {
-      finish("模型没有返回内容，请重试或换一个模型。");
+      fail("模型没有返回内容，请重试或换一个模型。");
     }
   } catch {
-    finish("网络错误，请重试。");
+    fail("网络错误，请重试。");
   } finally {
     setLoading(false);
   }

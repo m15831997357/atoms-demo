@@ -4,7 +4,8 @@ const SYSTEM_PROMPT = `你是一名资深前端工程师。根据用户需求生
 2. 不要输出任何解释文字，不要使用 markdown 代码块。
 3. 不要引用任何外部资源（图片、字体、脚本、CDN 都不行）。
 4. 界面要美观、有真实交互，处理好空状态和输入校验。
-5. 页面运行在沙箱 iframe 中，localStorage 可能不可用，凡是用到必须用 try/catch 包裹，失败时退回内存变量。`;
+5. 页面运行在沙箱 iframe 中，localStorage 可能不可用，凡是用到必须用 try/catch 包裹，失败时退回内存变量。
+6. 如果用户提供了现有代码，必须在其基础上修改：保留已有功能和界面风格，只改动需求涉及的部分，数据结构变化时要兼容旧数据，并输出修改后的完整 HTML。`;
 
 export async function POST(req: Request) {
   const { messages } = await req.json();
