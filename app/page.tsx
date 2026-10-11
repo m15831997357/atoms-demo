@@ -1,26 +1,35 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Msg = { role: "user" | "assistant"; content: string };
+type Project = { id: string; title: string; updated_at: string };
+type Chunk = {
+  error?: { message?: string };
+  choices?: { delta?: { content?: string }; finish_reason?: string | null }[];
+};
 
-// 假数据：先用它验证界面，第 2 步再换成模型生成的结果
-const FAKE_HTML = `<!doctype html>
-<html><body style="font-family:sans-serif;text-align:center;padding:40px">
-<h1>示例页面</h1>
-<p id="n">0</p>
-<button onclick="document.getElementById('n').textContent=++window.c||(window.c=1)">点我 +1</button>
-</body></html>`;
+const GREETING: Msg = { role: "assistant", content: "你好！描述你想做的应用，我来帮你生成。" };
 
-export default function Home() {
-  const [messages, setMessages] = useState<Msg[]>([
-    { role: "assistant", content: "你好！描述你想做的应用，我来帮你生成。" },
-  ]);
-  const [input, setInput] = useState("");
-  const [tab, setTab] = useState<"preview" | "code">("preview");
-  const [html, setHtml] = useState("");
+let memId = "";
+function getOwnerId() {
+  try {
+    let id = localStorage.getItem("ownerId");
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem("ownerId", id);
+    }
+    return id;
+  } catch {
+    return (memId ||= crypto.randomUUID());
+  }
+}
 
-const [loading, setLoading] = useState(false);
-const [baseHtml, setBaseHtml] = useState("");
+function api(url: string, init: RequestInit = {}) {
+  return fetch(url, {
+    ...init,
+    headers: { "Content-Type": "application/json", "x-owner-id": getOwnerId() },
+  });
+}
 
 function extractHtml(text: string) {
   const fence = text.match(/```(?:html)?\s*([\s\S]*?)(```|$)/);
@@ -30,92 +39,277 @@ function extractHtml(text: string) {
   return code.trim();
 }
 
-async function send() {
-  const text = input.trim();
-  if (!text || loading) return;
-  const isEdit = baseHtml !== "";
-  setMessages((m) => [
-    ...m,
-    { role: "user", content: text },
-    { role: "assistant", content: isEdit ? "正在修改…" : "正在生成…" },
-  ]);
-  setInput("");
-  setLoading(true);
-  setTab("code");
+export default function Home() {
+  const [messages, setMessages] = useState<Msg[]>([GREETING]);
+  const [input, setInput] = useState("");
+  const [tab, setTab] = useState<"preview" | "code">("preview");
+  const [html, setHtml] = useState("");
+  const [baseHtml, setBaseHtml] = useState("");
+  const [loading, setLoading] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [currentId, setCurrentId] = useState<string | null>(null);
 
-  const finish = (content: string) =>
-    setMessages((m) => [...m.slice(0, -1), { role: "assistant", content }]);
-  const fail = (content: string) => {
-    setHtml(baseHtml); // 回到上一个完整版本
-    finish(content);
-  };
-
-  const prompt = isEdit
-    ? `这是当前应用的完整代码：\n\n${baseHtml}\n\n请在此基础上按下面的要求修改，保留已有功能，只输出修改后的完整 HTML：\n${text}`
-    : text;
-
-  try {
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: [{ role: "user", content: prompt }] }),
-    });
-    if (!res.ok || !res.body) {
-      const err = await res.json().catch(() => ({}));
-      fail(`生成失败：${err.error ?? res.status}`);
-      return;
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let full = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (data === "[DONE]") continue;
-        try {
-          const delta = JSON.parse(data).choices?.[0]?.delta?.content;
-          if (delta) {
-            full += delta;
-            setHtml(extractHtml(full));
-          }
-        } catch {}
-      }
-    }
-    if (full.includes("</html>")) {
-      const done = extractHtml(full);
-      setHtml(done);
-      setBaseHtml(done);
-      setTab("preview");
-      finish(isEdit ? "已按要求修改，请在右侧查看。" : "已生成，请在右侧预览。");
-    } else if (full) {
-      fail("生成不完整（可能被截断），已保留上一版本，请重试。");
-    } else {
-      fail("模型没有返回内容，请重试或换一个模型。");
-    }
-  } catch {
-    fail("网络错误，请重试。");
-  } finally {
-    setLoading(false);
+  async function refreshProjects() {
+    try {
+      const res = await api("/api/projects");
+      if (res.ok) setProjects(await res.json());
+    } catch {}
   }
-}
+
+  async function openProject(id: string) {
+    if (loading) return;
+    try {
+      const res = await api(`/api/projects/${id}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setCurrentId(id);
+      setMessages([GREETING, ...data.messages]);
+      setHtml(data.html);
+      setBaseHtml(data.html);
+      setTab("preview");
+    } catch {}
+  }
+
+  function newProject() {
+    if (loading) return;
+    setCurrentId(null);
+    setMessages([GREETING]);
+    setHtml("");
+    setBaseHtml("");
+    setTab("preview");
+  }
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await api("/api/projects");
+        if (!res.ok) return;
+        const list: Project[] = await res.json();
+        setProjects(list);
+        if (list.length) openProject(list[0].id);
+      } catch {}
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function save(userMessage: string, assistantMessage: string, htmlDone: string) {
+    try {
+      let pid = currentId;
+      if (!pid) {
+        const r = await api("/api/projects", {
+          method: "POST",
+          body: JSON.stringify({ title: userMessage.slice(0, 20) }),
+        });
+        if (!r.ok) {
+          console.error("create project failed", r.status, await r.text());
+          return false;
+        }
+        pid = (await r.json()).id as string;
+        setCurrentId(pid);
+      }
+      const r2 = await api(`/api/projects/${pid}`, {
+        method: "POST",
+        body: JSON.stringify({ userMessage, assistantMessage, html: htmlDone }),
+      });
+      if (!r2.ok) {
+        console.error("save project failed", r2.status, await r2.text());
+        return false;
+      }
+      refreshProjects();
+      return true;
+    } catch (e) {
+      console.error("save error", e);
+      return false;
+    }
+  }
+  async function send() {
+    const text = input.trim();
+    if (!text || loading) return;
+    const isEdit = baseHtml !== "";
+    setMessages((m) => [
+      ...m,
+      { role: "user", content: text },
+      { role: "assistant", content: isEdit ? "正在修改…" : "正在生成…" },
+    ]);
+    setInput("");
+    setLoading(true);
+    setTab("code");
+
+    const finish = (content: string) =>
+      setMessages((m) => [...m.slice(0, -1), { role: "assistant", content }]);
+    const fail = (content: string) => {
+      setHtml(baseHtml);
+      setTab("preview");
+      finish(content);
+    };
+
+    const prompt = isEdit
+      ? `这是当前应用的完整代码：\n\n${baseHtml}\n\n请在此基础上按下面的要求修改，保留已有功能，只输出修改后的完整 HTML：\n${text}`
+      : text;
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const state = { received: false, finishReason: "", streamError: "" };
+
+    async function generate() {
+      state.received = false;
+      state.finishReason = "";
+      state.streamError = "";
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: prompt }] }),
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error ?? `HTTP ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let full = "";
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data:")) continue;
+            const data = line.slice(5).trim();
+            if (data === "[DONE]") continue;
+            let json: Chunk;
+            try {
+              json = JSON.parse(data);
+            } catch {
+              continue;
+            }
+            if (json.error) throw new Error(json.error.message ?? "模型服务出错");
+            const choice = json.choices?.[0];
+            if (choice?.finish_reason) state.finishReason = choice.finish_reason;
+            const delta = choice?.delta?.content;
+            if (delta) {
+              full += delta;
+              state.received = true;
+              setHtml(extractHtml(full));
+            }
+          }
+        }
+      } catch (e) {
+        if ((e as Error).name === "AbortError") throw e;
+        state.streamError = (e as Error).message; // 已收到的内容先留着，不丢
+      }
+      if (!full && state.streamError) throw new Error(state.streamError);
+      return full;
+    }
+
+    try {
+      let full: string | null = null;
+      let lastError = "";
+      for (let attempt = 0; attempt < 3 && full === null; attempt++) {
+        try {
+          if (attempt > 0) finish("连接中断，正在自动重试…");
+          full = await generate();
+        } catch (e) {
+          if ((e as Error).name === "AbortError") {
+            fail("已停止生成，已保留上一版本。");
+            return;
+          }
+          console.warn("generate failed", e);
+          lastError = (e as Error).message;
+          if (state.received) break;
+        }
+      }
+      if (full === null) {
+        fail(`生成失败：${lastError || "未知错误"}，请重试。`);
+        return;
+      }
+
+      console.info("generate done", {
+        chars: full.length,
+        finishReason: state.finishReason,
+        streamError: state.streamError,
+      });
+
+      const complete =
+        /<\/html>/i.test(full) ||
+        (state.finishReason === "stop" && /<html|<!doctype/i.test(full));
+
+      if (complete) {
+        const done = extractHtml(full);
+        setHtml(done);
+        setBaseHtml(done);
+        setTab("preview");
+        const doneMsg = isEdit ? "已按要求修改，请在右侧查看。" : "已生成，请在右侧预览。";
+        const saved = await save(text, doneMsg, done);
+        finish(saved ? doneMsg : doneMsg + "（保存失败，刷新后会丢失）");
+      } else if (full) {
+        fail(
+          state.finishReason === "length"
+            ? "输出达到长度上限被截断，已保留上一版本。请把需求拆小一点，分几次提出。"
+            : state.streamError
+              ? `生成中途中断（${state.streamError}），已保留上一版本，请重试。`
+              : "生成不完整，已保留上一版本，请重试。"
+        );
+      } else {
+        fail(
+          state.finishReason === "length"
+            ? "模型把输出额度都用在了思考上，没来得及写代码。请换非推理模型，或简化需求。"
+            : "模型没有返回内容，请重试或换一个模型。"
+        );
+      }
+    } finally {
+      setLoading(false);
+      abortRef.current = null;
+    }
+  }
+  const busyTip = loading ? "生成中，请等待完成或点「停止」" : undefined;
+
   return (
     <div className="flex h-screen bg-white text-gray-900">
-      {/* 左：聊天区 */}
-      <div className="flex w-[380px] flex-col border-r border-gray-200">
-        <div className="border-b border-gray-200 p-4 font-semibold">Atoms Demo</div>
+      {/* 最左：项目列表 */}
+      <div className="flex w-52 flex-col border-r border-gray-200 bg-gray-50">
+        <div className="flex items-center justify-between border-b border-gray-200 p-4">
+          <span className="font-semibold">Atoms Demo</span>
+          <button
+            onClick={newProject}
+            disabled={loading}
+            title={busyTip}
+            className="text-xs text-blue-600 hover:underline disabled:opacity-40"
+          >
+            + 新建
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-2">
+          {projects.length === 0 && <div className="p-2 text-xs text-gray-400">还没有项目</div>}
+          {projects.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => openProject(p.id)}
+              disabled={loading}
+              title={busyTip}
+              className={
+                "mb-1 block w-full truncate rounded-md px-3 py-2 text-left text-sm " +
+                (p.id === currentId ? "bg-white shadow-sm" : "hover:bg-gray-100")
+              }
+            >
+              {p.title}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 中：聊天区 */}
+      <div className="flex w-[360px] flex-col border-r border-gray-200">
         <div className="flex-1 space-y-3 overflow-y-auto p-4">
           {messages.map((m, i) => (
             <div key={i} className={m.role === "user" ? "text-right" : ""}>
               <span
                 className={
-                  "inline-block max-w-[85%] rounded-lg px-3 py-2 text-sm " +
+                  "inline-block max-w-[85%] rounded-lg px-3 py-2 text-left text-sm " +
                   (m.role === "user" ? "bg-blue-600 text-white" : "bg-gray-100")
                 }
               >
@@ -129,7 +323,6 @@ async function send() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
-              // 中文输入法选字时按回车不应触发发送
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault();
                 send();
@@ -139,9 +332,21 @@ async function send() {
             placeholder="描述你想做的应用…"
             className="flex-1 resize-none rounded-md border border-gray-300 p-2 text-sm outline-none focus:border-blue-500"
           />
-          <button onClick={send} className="rounded-md bg-blue-600 px-4 text-sm text-white hover:bg-blue-700">
-            发送
-          </button>
+          {loading ? (
+            <button
+              onClick={() => abortRef.current?.abort()}
+              className="rounded-md bg-red-600 px-4 text-sm text-white hover:bg-red-700"
+            >
+              停止
+            </button>
+          ) : (
+            <button
+              onClick={send}
+              className="rounded-md bg-blue-600 px-4 text-sm text-white hover:bg-blue-700"
+            >
+              发送
+            </button>
+          )}
         </div>
       </div>
 
