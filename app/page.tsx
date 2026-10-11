@@ -3,12 +3,19 @@ import { useEffect, useRef, useState } from "react";
 
 type Msg = { role: "user" | "assistant"; content: string };
 type Project = { id: string; title: string; updated_at: string };
+type Version = { id: string; prompt: string; html: string; created_at: string };
+type Tab = "preview" | "code" | "history";
 type Chunk = {
   error?: { message?: string };
   choices?: { delta?: { content?: string }; finish_reason?: string | null }[];
 };
 
 const GREETING: Msg = { role: "assistant", content: "你好！描述你想做的应用，我来帮你生成。" };
+const TABS: { key: Tab; label: string }[] = [
+  { key: "preview", label: "预览" },
+  { key: "code", label: "代码" },
+  { key: "history", label: "版本" },
+];
 
 let memId = "";
 function getOwnerId() {
@@ -42,19 +49,40 @@ function extractHtml(text: string) {
 export default function Home() {
   const [messages, setMessages] = useState<Msg[]>([GREETING]);
   const [input, setInput] = useState("");
-  const [tab, setTab] = useState<"preview" | "code">("preview");
+  const [tab, setTab] = useState<Tab>("preview");
   const [html, setHtml] = useState("");
   const [baseHtml, setBaseHtml] = useState("");
   const [loading, setLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null);
+  const [versions, setVersions] = useState<Version[]>([]);
+  const [viewing, setViewing] = useState<{ v: Version; n: number } | null>(null);
 
   async function refreshProjects() {
     try {
       const res = await api("/api/projects");
       if (res.ok) setProjects(await res.json());
     } catch {}
+  }
+
+  async function loadVersions(pid: string | null) {
+    if (!pid) {
+      setVersions([]);
+      return;
+    }
+    try {
+      const res = await api(`/api/projects/${pid}/versions`);
+      if (res.ok) setVersions(await res.json());
+    } catch {}
+  }
+
+  function selectTab(t: Tab) {
+    setTab(t);
+    if (t === "history") {
+      setViewing(null);
+      loadVersions(currentId);
+    }
   }
 
   async function openProject(id: string) {
@@ -67,6 +95,8 @@ export default function Home() {
       setMessages([GREETING, ...data.messages]);
       setHtml(data.html);
       setBaseHtml(data.html);
+      setVersions([]);
+      setViewing(null);
       setTab("preview");
     } catch {}
   }
@@ -77,6 +107,8 @@ export default function Home() {
     setMessages([GREETING]);
     setHtml("");
     setBaseHtml("");
+    setVersions([]);
+    setViewing(null);
     setTab("preview");
   }
 
@@ -123,6 +155,24 @@ export default function Home() {
       return false;
     }
   }
+
+  async function restore(v: Version, n: number) {
+    if (loading || !currentId) return;
+    const userMsg = `回滚到版本 ${n}`;
+    const aiMsg = `已恢复到版本 ${n}。`;
+    const ok = await save(userMsg, aiMsg, v.html);
+    if (!ok) {
+      setMessages((m) => [...m, { role: "assistant", content: "恢复失败，请重试。" }]);
+      setTab("preview");
+      return;
+    }
+    setMessages((m) => [...m, { role: "user", content: userMsg }, { role: "assistant", content: aiMsg }]);
+    setHtml(v.html);
+    setBaseHtml(v.html);
+    setViewing(null);
+    setTab("preview");
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || loading) return;
@@ -200,7 +250,7 @@ export default function Home() {
         }
       } catch (e) {
         if ((e as Error).name === "AbortError") throw e;
-        state.streamError = (e as Error).message; // 已收到的内容先留着，不丢
+        state.streamError = (e as Error).message;
       }
       if (!full && state.streamError) throw new Error(state.streamError);
       return full;
@@ -227,12 +277,6 @@ export default function Home() {
         fail(`生成失败：${lastError || "未知错误"}，请重试。`);
         return;
       }
-
-      console.info("generate done", {
-        chars: full.length,
-        finishReason: state.finishReason,
-        streamError: state.streamError,
-      });
 
       const complete =
         /<\/html>/i.test(full) ||
@@ -266,6 +310,7 @@ export default function Home() {
       abortRef.current = null;
     }
   }
+
   const busyTip = loading ? "生成中，请等待完成或点「停止」" : undefined;
 
   return (
@@ -350,24 +395,78 @@ export default function Home() {
         </div>
       </div>
 
-      {/* 右：预览 / 代码 */}
+      {/* 右：预览 / 代码 / 版本 */}
       <div className="flex flex-1 flex-col">
         <div className="flex gap-1 border-b border-gray-200 p-2">
-          {(["preview", "code"] as const).map((t) => (
+          {TABS.map((t) => (
             <button
-              key={t}
-              onClick={() => setTab(t)}
+              key={t.key}
+              onClick={() => selectTab(t.key)}
               className={
                 "rounded-md px-3 py-1 text-sm " +
-                (tab === t ? "bg-gray-900 text-white" : "text-gray-600 hover:bg-gray-100")
+                (tab === t.key ? "bg-gray-900 text-white" : "text-gray-600 hover:bg-gray-100")
               }
             >
-              {t === "preview" ? "预览" : "代码"}
+              {t.label}
             </button>
           ))}
         </div>
         <div className="flex-1 overflow-auto bg-gray-50">
-          {!html ? (
+          {tab === "history" ? (
+            <div className="flex h-full">
+              <div className="w-60 shrink-0 overflow-y-auto border-r border-gray-200 bg-white p-2">
+                {versions.length === 0 && <div className="p-2 text-xs text-gray-400">还没有版本</div>}
+                {versions
+                  .map((v, i) => ({ v, n: i + 1 }))
+                  .reverse()
+                  .map(({ v, n }) => (
+                    <button
+                      key={v.id}
+                      onClick={() => setViewing({ v, n })}
+                      className={
+                        "mb-1 block w-full rounded-md px-3 py-2 text-left " +
+                        (viewing?.v.id === v.id ? "bg-gray-100" : "hover:bg-gray-50")
+                      }
+                    >
+                      <div className="text-sm font-medium">
+                        版本 {n}
+                        {n === versions.length ? "（当前）" : ""}
+                      </div>
+                      <div className="truncate text-xs text-gray-500">{v.prompt}</div>
+                      <div className="text-xs text-gray-400">{new Date(v.created_at).toLocaleString()}</div>
+                    </button>
+                  ))}
+              </div>
+              <div className="flex flex-1 flex-col">
+                {viewing ? (
+                  <>
+                    <div className="flex items-center justify-between border-b border-gray-200 bg-white px-3 py-2 text-sm">
+                      <span>正在查看版本 {viewing.n}</span>
+                      {viewing.n !== versions.length && (
+                        <button
+                          onClick={() => restore(viewing.v, viewing.n)}
+                          disabled={loading}
+                          className="rounded-md bg-blue-600 px-3 py-1 text-white hover:bg-blue-700 disabled:opacity-50"
+                        >
+                          恢复此版本
+                        </button>
+                      )}
+                    </div>
+                    <iframe
+                      title="version-preview"
+                      srcDoc={viewing.v.html}
+                      sandbox="allow-scripts"
+                      className="w-full flex-1 border-0 bg-white"
+                    />
+                  </>
+                ) : (
+                  <div className="flex flex-1 items-center justify-center text-sm text-gray-400">
+                    点击左侧的版本进行预览
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : !html ? (
             <div className="flex h-full items-center justify-center text-sm text-gray-400">
               在左侧描述需求，生成的应用会显示在这里
             </div>
