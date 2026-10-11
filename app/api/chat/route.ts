@@ -1,3 +1,5 @@
+import { getOwner } from "@/lib/supabase";
+
 export const maxDuration = 300;
 
 const SYSTEM_PROMPT = `你是一名资深前端工程师。根据用户需求生成一个可直接运行的网页应用。
@@ -10,16 +12,53 @@ const SYSTEM_PROMPT = `你是一名资深前端工程师。根据用户需求生
 6. 如果用户提供了现有代码，必须在其基础上修改：保留已有功能和界面风格，只改动需求涉及的部分，数据结构变化时要兼容旧数据，并输出修改后的完整 HTML。
 7. 代码要精简：整个 HTML 控制在约 400 行以内，少写注释，样式用紧凑写法，避免重复代码。`;
 
-export async function POST(req: Request) {
-  const { messages } = await req.json();
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  const model = process.env.MODEL_NAME;
+const MAX_CHARS = 60000;
 
-  if (!apiKey || !model) {
-    return Response.json({ error: "服务端未配置 OPENROUTER_API_KEY 或 MODEL_NAME" }, { status: 500 });
+// 简单的内存限流：部署在多实例环境时只是尽力而为，真正的兜底是 OpenRouter key 的额度上限
+const hits = new Map<string, number[]>();
+function limited(key: string, max: number, windowMs: number) {
+  if (hits.size > 5000) hits.clear();
+  const now = Date.now();
+  const arr = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
+  if (arr.length >= max) {
+    hits.set(key, arr);
+    return true;
+  }
+  arr.push(now);
+  hits.set(key, arr);
+  return false;
+}
+
+export async function POST(req: Request) {
+  const owner = getOwner(req);
+  if (!owner) return Response.json({ error: "缺少用户标识，请刷新页面重试" }, { status: 401 });
+
+  const body = await req.json().catch(() => null);
+  const messages = body?.messages;
+  if (
+    !Array.isArray(messages) ||
+    messages.length === 0 ||
+    messages.length > 20 ||
+    !messages.every((m) => m && typeof m.content === "string" && (m.role === "user" || m.role === "assistant"))
+  ) {
+    return Response.json({ error: "请求内容不合法" }, { status: 400 });
+  }
+  const total = messages.reduce((n: number, m: { content: string }) => n + m.content.length, 0);
+  if (total > MAX_CHARS) {
+    return Response.json({ error: "内容太长，请把需求拆小一点" }, { status: 413 });
   }
 
-  const body = JSON.stringify({
+  if (limited(`o:${owner}`, 30, 10 * 60 * 1000) || limited("global", 300, 60 * 60 * 1000)) {
+    return Response.json({ error: "请求太频繁，请稍等几分钟再试" }, { status: 429 });
+  }
+
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  const model = process.env.MODEL_NAME;
+  if (!apiKey || !model) {
+    return Response.json({ error: "服务端未配置模型，请联系管理员" }, { status: 500 });
+  }
+
+  const payload = JSON.stringify({
     model,
     stream: true,
     max_tokens: 8000,
@@ -34,7 +73,7 @@ export async function POST(req: Request) {
       upstream = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body,
+        body: payload,
       });
     } catch (e) {
       console.warn(`openrouter fetch failed (第${i + 1}次):`, (e as { cause?: unknown }).cause ?? e);
@@ -47,7 +86,7 @@ export async function POST(req: Request) {
   if (!upstream.ok || !upstream.body) {
     const detail = (await upstream.text()).slice(0, 300);
     console.error("upstream error", upstream.status, detail);
-    return Response.json({ error: `模型服务返回 ${upstream.status}`, detail }, { status: 502 });
+    return Response.json({ error: `模型服务返回 ${upstream.status}` }, { status: 502 });
   }
 
   const reader = upstream.body.getReader();
