@@ -13,8 +13,8 @@ async function ownsProject(owner: string, id: string) {
 }
 
 export async function GET(req: Request, { params }: Ctx) {
-  const owner = getOwner(req);
-  if (!owner) return Response.json({ error: "缺少用户标识" }, { status: 401 });
+  const owner = await getOwner(req);
+  if (!owner) return Response.json({ error: "登录已失效，请重新登录" }, { status: 401 });
   const { id } = await params;
   if (!(await ownsProject(owner, id))) return Response.json({ error: "项目不存在" }, { status: 404 });
 
@@ -27,8 +27,8 @@ export async function GET(req: Request, { params }: Ctx) {
 }
 
 export async function POST(req: Request, { params }: Ctx) {
-  const owner = getOwner(req);
-  if (!owner) return Response.json({ error: "缺少用户标识" }, { status: 401 });
+  const owner = await getOwner(req);
+  if (!owner) return Response.json({ error: "登录已失效，请重新登录" }, { status: 401 });
   const { id } = await params;
   if (!(await ownsProject(owner, id))) return Response.json({ error: "项目不存在" }, { status: 404 });
 

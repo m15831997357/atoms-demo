@@ -6,7 +6,16 @@ export function db() {
   });
 }
 
-export function getOwner(req: Request) {
-  const id = req.headers.get("x-owner-id") ?? "";
-  return /^[0-9a-f-]{36}$/i.test(id) ? id : null;
+// 从请求头里的登录令牌解析出用户 ID；令牌缺失或无效返回 null
+export async function getOwner(req: Request): Promise<string | null> {
+  const auth = req.headers.get("authorization") ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  if (!token) return null;
+  try {
+    const { data, error } = await db().auth.getUser(token);
+    if (error || !data.user) return null;
+    return data.user.id;
+  } catch {
+    return null;
+  }
 }

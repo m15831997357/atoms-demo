@@ -1,8 +1,8 @@
 import { db, getOwner } from "@/lib/supabase";
 
 export async function GET(req: Request) {
-  const owner = getOwner(req);
-  if (!owner) return Response.json({ error: "缺少用户标识" }, { status: 401 });
+  const owner = await getOwner(req);
+  if (!owner) return Response.json({ error: "登录已失效，请重新登录" }, { status: 401 });
   const { data, error } = await db()
     .from("projects")
     .select("id,title,updated_at")
@@ -13,8 +13,8 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const owner = getOwner(req);
-  if (!owner) return Response.json({ error: "缺少用户标识" }, { status: 401 });
+  const owner = await getOwner(req);
+  if (!owner) return Response.json({ error: "登录已失效，请重新登录" }, { status: 401 });
   const { title } = await req.json();
   const { data, error } = await db()
     .from("projects")

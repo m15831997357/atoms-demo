@@ -1,5 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import type { User } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase-browser";
 
 type Msg = { role: "user" | "assistant"; content: string };
 type Project = { id: string; title: string; updated_at: string };
@@ -23,24 +25,16 @@ const EXAMPLES = [
 ];
 const IDLE_TIMEOUT_MS = 90000;
 
-let memId = "";
-function getOwnerId() {
-  try {
-    let id = localStorage.getItem("ownerId");
-    if (!id) {
-      id = crypto.randomUUID();
-      localStorage.setItem("ownerId", id);
-    }
-    return id;
-  } catch {
-    return (memId ||= crypto.randomUUID());
-  }
+async function authHeader(): Promise<Record<string, string>> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-function api(url: string, init: RequestInit = {}) {
+async function api(url: string, init: RequestInit = {}) {
   return fetch(url, {
     ...init,
-    headers: { "Content-Type": "application/json", "x-owner-id": getOwnerId() },
+    headers: { "Content-Type": "application/json", ...(await authHeader()) },
   });
 }
 
@@ -57,6 +51,15 @@ function friendlyError(msg: string) {
   return msg;
 }
 
+function authError(msg: string) {
+  if (/invalid login credentials/i.test(msg)) return "邮箱或密码不正确";
+  if (/already registered|already been registered/i.test(msg)) return "该邮箱已注册，请直接登录";
+  if (/email not confirmed/i.test(msg)) return "邮箱尚未确认，请先点击邮件中的确认链接";
+  if (/rate limit/i.test(msg)) return "操作太频繁，请稍后再试";
+  if (/password/i.test(msg)) return "密码不符合要求，请至少使用 6 位";
+  return msg;
+}
+
 // 注入到预览 iframe 的脚本：把页面里的运行时错误报告给外层。只用于展示，不会存进数据库
 const GUARD = `<script>(function(){function r(m){try{parent.postMessage({type:"iframe-error",message:String(m).slice(0,300)},"*")}catch(e){}}window.addEventListener("error",function(e){r(e.message||(e.error&&e.error.message)||"未知错误")});window.addEventListener("unhandledrejection",function(e){r((e.reason&&e.reason.message)||e.reason)})})();</script>`;
 function withGuard(html: string) {
@@ -66,6 +69,14 @@ function withGuard(html: string) {
 }
 
 export default function Home() {
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [authMsg, setAuthMsg] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+
   const [messages, setMessages] = useState<Msg[]>([GREETING]);
   const [input, setInput] = useState("");
   const [tab, setTab] = useState<Tab>("preview");
@@ -80,6 +91,48 @@ export default function Home() {
   const [versions, setVersions] = useState<Version[]>([]);
   const [viewing, setViewing] = useState<{ v: Version; n: number } | null>(null);
   const [runtimeError, setRuntimeError] = useState("");
+
+  function resetWorkspace() {
+    setCurrentId(null);
+    setMessages([GREETING]);
+    setHtml("");
+    setBaseHtml("");
+    setVersions([]);
+    setViewing(null);
+    setRuntimeError("");
+    setProjects([]);
+    setInput("");
+    setTab("preview");
+  }
+
+  async function submitAuth() {
+    const em = email.trim();
+    if (!em || !password) {
+      setAuthMsg("请输入邮箱和密码");
+      return;
+    }
+    setAuthBusy(true);
+    setAuthMsg("");
+    try {
+      if (authMode === "signup") {
+        const { data, error } = await supabase.auth.signUp({ email: em, password });
+        if (error) setAuthMsg(authError(error.message));
+        else if (!data.session) setAuthMsg("注册成功，请前往邮箱点击确认链接后再登录。");
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email: em, password });
+        if (error) setAuthMsg(authError(error.message));
+      }
+    } catch {
+      setAuthMsg("网络错误，请重试");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function logout() {
+    abortRef.current?.abort();
+    await supabase.auth.signOut();
+  }
 
   async function refreshProjects() {
     try {
@@ -138,6 +191,20 @@ export default function Home() {
   }
 
   useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setUser(data.session?.user ?? null);
+      setAuthReady(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  const userId = user?.id ?? null;
+  useEffect(() => {
+    resetWorkspace();
+    if (!userId) return;
     (async () => {
       try {
         const res = await api("/api/projects");
@@ -148,7 +215,7 @@ export default function Home() {
       } catch {}
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
     function onMsg(e: MessageEvent) {
@@ -266,7 +333,7 @@ export default function Home() {
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json", "x-owner-id": getOwnerId() },
+          headers: { "Content-Type": "application/json", ...(await authHeader()) },
           body: JSON.stringify({ messages: [{ role: "user", content: prompt }] }),
           signal: controller.signal,
         });
@@ -379,6 +446,61 @@ export default function Home() {
 
   const busyTip = loading ? "生成中，请等待完成或点「停止」" : undefined;
 
+  if (!authReady) {
+    return <div className="flex h-screen items-center justify-center text-sm text-gray-400">加载中…</div>;
+  }
+
+  if (!user) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gray-50 p-4">
+        <div className="w-full max-w-sm rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+          <h1 className="text-lg font-semibold">Atoms Demo</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            {authMode === "login" ? "登录后继续你的项目" : "创建账号，立即开始使用"}
+          </p>
+          <div className="mt-4 space-y-3">
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="邮箱"
+              autoComplete="email"
+              className="w-full rounded-md border border-gray-300 p-2 text-sm outline-none focus:border-blue-500"
+            />
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitAuth();
+              }}
+              placeholder="密码（至少 6 位）"
+              autoComplete={authMode === "login" ? "current-password" : "new-password"}
+              className="w-full rounded-md border border-gray-300 p-2 text-sm outline-none focus:border-blue-500"
+            />
+            {authMsg && <div className="text-sm text-red-600">{authMsg}</div>}
+            <button
+              onClick={submitAuth}
+              disabled={authBusy}
+              className="w-full rounded-md bg-blue-600 py-2 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {authBusy ? "请稍候…" : authMode === "login" ? "登录" : "注册"}
+            </button>
+          </div>
+          <button
+            onClick={() => {
+              setAuthMode(authMode === "login" ? "signup" : "login");
+              setAuthMsg("");
+            }}
+            className="mt-4 text-sm text-blue-600 hover:underline"
+          >
+            {authMode === "login" ? "没有账号？去注册" : "已有账号？去登录"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen bg-white text-gray-900">
       {/* 最左：项目列表 */}
@@ -410,6 +532,14 @@ export default function Home() {
               {p.title}
             </button>
           ))}
+        </div>
+        <div className="border-t border-gray-200 p-3 text-xs text-gray-500">
+          <div className="truncate" title={user.email ?? ""}>
+            {user.email}
+          </div>
+          <button onClick={logout} className="mt-1 text-blue-600 hover:underline">
+            退出登录
+          </button>
         </div>
       </div>
 

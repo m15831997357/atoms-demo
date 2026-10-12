@@ -30,8 +30,8 @@ function limited(key: string, max: number, windowMs: number) {
 }
 
 export async function POST(req: Request) {
-  const owner = getOwner(req);
-  if (!owner) return Response.json({ error: "缺少用户标识，请刷新页面重试" }, { status: 401 });
+  const owner = await getOwner(req);
+  if (!owner) return Response.json({ error: "登录已失效，请重新登录" }, { status: 401 });
 
   const body = await req.json().catch(() => null);
   const messages = body?.messages;
